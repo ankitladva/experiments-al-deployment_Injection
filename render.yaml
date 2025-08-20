@@ -13,7 +13,6 @@ services:
     plan: free
     dockerfilePath: face-verification-ui/Dockerfile.frontend
     autoDeploy: true
-    buildFilter: true
     envVars:
       - key: VITE_BACKEND_URL
         fromService:
