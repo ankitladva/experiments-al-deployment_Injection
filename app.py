@@ -36,13 +36,26 @@ def health_check():
 # Optional MongoDB integration
 MONGODB_URI = os.getenv("MONGODB_URI")
 MONGODB_DB = os.getenv("MONGODB_DB", "kyc")
+# TLS controls
+TLS_CA_FILE = os.getenv("MONGODB_TLS_CA_FILE", "/etc/ssl/certs/ca-certificates.crt")
+TLS_INSECURE = os.getenv("MONGODB_TLS_INSECURE", "false").lower() == "true"
+
 mongo_client = None
 mongo_db = None
 grid_fs = None
 
 if MONGODB_URI:
     try:
-        mongo_client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000)
+        client_kwargs = {
+            "serverSelectionTimeoutMS": 10000,
+            "tls": True,
+        }
+        if TLS_INSECURE:
+            client_kwargs["tlsAllowInvalidCertificates"] = True
+        else:
+            client_kwargs["tlsCAFile"] = TLS_CA_FILE
+
+        mongo_client = MongoClient(MONGODB_URI, **client_kwargs)
         # Trigger a server selection to validate connection early
         mongo_client.admin.command('ping')
         mongo_db = mongo_client[MONGODB_DB]
