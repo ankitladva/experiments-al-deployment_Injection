@@ -13,14 +13,10 @@ services:
     plan: free
     dockerfilePath: face-verification-ui/Dockerfile.frontend
     autoDeploy: true
+    buildFilter: true
     envVars:
-      - key: BACKEND_HOST
+      - key: VITE_BACKEND_URL
         fromService:
           type: web
           name: kyc-backend
-          property: host
-      - key: BACKEND_PORT
-        fromService:
-          type: web
-          name: kyc-backend
-          property: port 
+          property: host 
