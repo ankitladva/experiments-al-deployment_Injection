@@ -1,0 +1,14 @@
+.DS_Store
+lip_landmarks
+full_audio.wav
+videos
+speech_clips
+__pycache__
+utils/__pycache__
+node_modules
+/node_modules
+*.webm
+*.mp4
+*.png
+data
+dist
