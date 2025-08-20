@@ -6,10 +6,6 @@ services:
     dockerfilePath: Dockerfile.backend
     autoDeploy: true
     healthCheckPath: /health
-    disk:
-      name: data
-      mountPath: /app/data
-      sizeGB: 1
 
   - type: web
     name: kyc-frontend
@@ -18,8 +14,13 @@ services:
     dockerfilePath: face-verification-ui/Dockerfile.frontend
     autoDeploy: true
     envVars:
-      - key: VITE_BACKEND_URL
+      - key: BACKEND_HOST
         fromService:
           type: web
           name: kyc-backend
-          property: url 
+          property: host
+      - key: BACKEND_PORT
+        fromService:
+          type: web
+          name: kyc-backend
+          property: port 

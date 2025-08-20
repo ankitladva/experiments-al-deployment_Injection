@@ -10,10 +10,12 @@ import shutil
 from collections import defaultdict
 import uvicorn
 import ssl
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 from utils import compare_all_frames
 import glob
 import datetime
+from pymongo import MongoClient
+import gridfs
 
 app = FastAPI()
 
@@ -30,6 +32,85 @@ app.add_middleware(
 @app.get("/health")
 def health_check():
     return {"status": "ok"}
+
+# Optional MongoDB integration
+MONGODB_URI = os.getenv("MONGODB_URI")
+MONGODB_DB = os.getenv("MONGODB_DB", "kyc")
+mongo_client = None
+mongo_db = None
+grid_fs = None
+
+if MONGODB_URI:
+    try:
+        mongo_client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000)
+        # Trigger a server selection to validate connection early
+        mongo_client.admin.command('ping')
+        mongo_db = mongo_client[MONGODB_DB]
+        grid_fs = gridfs.GridFS(mongo_db)
+        print(f"✅ Connected to MongoDB database: {MONGODB_DB}")
+    except Exception as e:
+        print(f"⚠️ MongoDB connection failed: {e}")
+        mongo_client = None
+        mongo_db = None
+        grid_fs = None
+
+
+def mongo_enabled() -> bool:
+    return mongo_db is not None
+
+
+def save_color_change_to_mongo(user_id: str, entry: dict) -> None:
+    if not mongo_enabled():
+        return
+    try:
+        doc = {
+            "user_id": user_id,
+            **entry,
+            "created_at": datetime.datetime.utcnow().isoformat()
+        }
+        mongo_db["color_changes"].insert_one(doc)
+    except Exception as e:
+        print(f"⚠️ Failed to save color change to MongoDB: {e}")
+
+
+def upload_image_to_gridfs(file_path: str, filename: str, metadata: dict) -> None:
+    if not mongo_enabled() or grid_fs is None:
+        return
+    try:
+        with open(file_path, "rb") as f:
+            grid_fs.put(f.read(), filename=filename, metadata=metadata)
+    except Exception as e:
+        print(f"⚠️ Failed to upload image to GridFS: {e}")
+
+def upload_file_to_gridfs(file_path: str, filename: str, content_type: Optional[str] = None, metadata: Optional[dict] = None) -> Optional[str]:
+    if not mongo_enabled() or grid_fs is None:
+        return None
+    try:
+        with open(file_path, "rb") as f:
+            file_id = grid_fs.put(
+                f.read(),
+                filename=filename,
+                content_type=content_type,
+                metadata=metadata or {}
+            )
+            print(f"✅ Uploaded to GridFS: {filename} -> {file_id}")
+            return str(file_id)
+    except Exception as e:
+        print(f"⚠️ Failed to upload file to GridFS: {e}")
+        return None
+
+
+def save_analysis_to_mongo(user_id: str, analysis_result: dict) -> None:
+    if not mongo_enabled():
+        return
+    try:
+        doc = {
+            "user_id": user_id,
+            **analysis_result
+        }
+        mongo_db["analysis_results"].insert_one(doc)
+    except Exception as e:
+        print(f"⚠️ Failed to save analysis to MongoDB: {e}")
 
 # Define storage directories
 UPLOAD_FOLDER = "data"
@@ -144,15 +225,19 @@ def handle_color_change(data, user_id):
             with open(user_color_file, "r") as f:
                 color_data = json.load(f)
 
-        color_data.append({
+        entry = {
             "previous_color": previous_color_name,
             "new_color": new_color_name,
             "timestamp": timestamp,
             "video_start_time": video_start_time
-        })
+        }
+        color_data.append(entry)
 
         with open(user_color_file, "w") as f:
             json.dump(color_data, f, indent=4)
+
+    # Also persist to MongoDB if configured
+    save_color_change_to_mongo(user_id, entry)
 
     print(f"🎨 Color Change Logged: {previous_color_name} → {new_color_name} at {timestamp} for {user_id}")
 
@@ -184,6 +269,7 @@ def handle_video_end(data, user_id):
             return
 
         # Merge chunks into a single video file
+        num_chunks = len(user_data[user_id]["video_chunks"])
         output_video_path = os.path.join(MP4_FOLDER, f"{user_id}_final_video.mp4")
 
         with open(output_video_path, "wb") as merged_video:
@@ -195,6 +281,17 @@ def handle_video_end(data, user_id):
         user_data[user_id]["video_chunks"].clear()
 
         print(f"Video created for user {user_id}: {output_video_path}")
+        # Upload merged MP4 to GridFS if enabled
+        upload_file_to_gridfs(
+            output_video_path,
+            filename=f"{user_id}/final_video.mp4",
+            content_type="video/mp4",
+            metadata={
+                "user_id": user_id,
+                "created_at": datetime.datetime.utcnow().isoformat(),
+                "num_chunks": num_chunks
+            }
+        )
         extract_frames(user_id, output_video_path)
         # res=analyze_video(user_id)
         cleanup_user_files(user_id)
@@ -308,6 +405,17 @@ def extract_frames(user_id, video_path):
                 frame_path = os.path.join(user_image_folder, frame_filename)
                 cv2.imwrite(frame_path, frame)
                 print(f"🖼️ Frame with text saved: {frame_path}")
+                # Upload this saved frame to GridFS if enabled
+                upload_image_to_gridfs(
+                    frame_path,
+                    filename=f"{user_id}/{frame_filename}",
+                    metadata={
+                        "user_id": user_id,
+                        "timestamp": int(timestamp),
+                        "relative_time_ms": int(relative_time_ms),
+                        "color": previous_color
+                    }
+                )
             # Increment frame number
             frame_number += 1
 
@@ -438,6 +546,9 @@ def is_video_injected(user_id):
         with open(output_file, 'w') as f:
             json.dump(analysis_result, f, indent=4)
 
+        # Also persist analysis to MongoDB if configured
+        save_analysis_to_mongo(user_id, analysis_result)
+
         # Clean up temporary directory
         shutil.rmtree(temp_dir)
 
@@ -455,6 +566,9 @@ def is_video_injected(user_id):
         output_file = os.path.join(analysis_dir, f"{user_id}_response.json")
         with open(output_file, 'w') as f:
             json.dump(error_result, f, indent=4)
+        
+        # Try to save error result to MongoDB as well
+        save_analysis_to_mongo(user_id, error_result)
             
         return error_result
 
