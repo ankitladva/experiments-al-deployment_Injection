@@ -11,7 +11,7 @@ services:
       mountPath: /app/data
       sizeGB: 1
 
-  - type: static
+  - type: static_site
     name: kyc-frontend
     buildCommand: cd face-verification-ui && npm ci && npm run build
     staticPublishPath: face-verification-ui/dist
