@@ -41,6 +41,8 @@ S3_PREFIX = os.getenv("S3_PREFIX", "")
 AWS_REGION = os.getenv("AWS_REGION")
 
 s3_client = None
+if not S3_BUCKET_NAME:
+    print("ℹ️ S3 disabled: S3_BUCKET_NAME not set")
 if S3_BUCKET_NAME:
     try:
         s3_client = boto3.client("s3", region_name=AWS_REGION) if AWS_REGION else boto3.client("s3")
