@@ -14,8 +14,8 @@ from typing import Dict, List, Any, Optional
 from utils import compare_all_frames
 import glob
 import datetime
-from pymongo import MongoClient
-import gridfs
+import boto3
+from botocore.exceptions import ClientError
 
 app = FastAPI()
 
@@ -33,119 +33,77 @@ app.add_middleware(
 def health_check():
     return {"status": "ok"}
 
-# Optional MongoDB integration
-MONGODB_URI = os.getenv("MONGODB_URI")
-MONGODB_DB = os.getenv("MONGODB_DB", "kyc")
-# TLS controls
-TLS_CA_FILE = os.getenv("MONGODB_TLS_CA_FILE", "/etc/ssl/certs/ca-certificates.crt")
-TLS_INSECURE = os.getenv("MONGODB_TLS_INSECURE", "false").lower() == "true"
+"""
+S3 configuration
+"""
+S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")
+S3_PREFIX = os.getenv("S3_PREFIX", "")
+AWS_REGION = os.getenv("AWS_REGION")
 
-mongo_client = None
-mongo_db = None
-grid_fs = None
-
-if MONGODB_URI:
+s3_client = None
+if S3_BUCKET_NAME:
     try:
-        client_kwargs = {
-            "serverSelectionTimeoutMS": 10000,
-            "tls": True,
-        }
-        if TLS_INSECURE:
-            client_kwargs["tlsAllowInvalidCertificates"] = True
-        else:
-            client_kwargs["tlsCAFile"] = TLS_CA_FILE
-
-        mongo_client = MongoClient(MONGODB_URI, **client_kwargs)
-        # Trigger a server selection to validate connection early
-        mongo_client.admin.command('ping')
-        mongo_db = mongo_client[MONGODB_DB]
-        grid_fs = gridfs.GridFS(mongo_db)
-        print(f"✅ Connected to MongoDB database: {MONGODB_DB}")
+        s3_client = boto3.client("s3", region_name=AWS_REGION) if AWS_REGION else boto3.client("s3")
+        # Validate bucket access
+        s3_client.head_bucket(Bucket=S3_BUCKET_NAME)
+        print(f"✅ Connected to S3 bucket: {S3_BUCKET_NAME}")
     except Exception as e:
-        print(f"⚠️ MongoDB connection failed: {e}")
-        mongo_client = None
-        mongo_db = None
-        grid_fs = None
+        print(f"⚠️ S3 initialization failed: {e}")
+        s3_client = None
 
 
-def mongo_enabled() -> bool:
-    return mongo_db is not None
+def s3_enabled() -> bool:
+    return s3_client is not None and bool(S3_BUCKET_NAME)
 
 
-def save_color_change_to_mongo(user_id: str, entry: dict) -> None:
-    if not mongo_enabled():
-        return
-    try:
-        # Only store essential color change data
-        doc = {
-            "user_id": user_id,
-            "previous_color": entry.get("previous_color"),
-            "new_color": entry.get("new_color"),
-            "timestamp": entry.get("timestamp"),
-            "video_start_time": entry.get("video_start_time"),
-            "created_at": datetime.datetime.utcnow()
-        }
-        mongo_db["color_changes"].insert_one(doc)
-    except Exception as e:
-        print(f"⚠️ Failed to save color change to MongoDB: {e}")
+def _s3_key(key: str) -> str:
+    key = key.lstrip("/")
+    if S3_PREFIX:
+        return f"{S3_PREFIX.rstrip('/')}/{key}"
+    return key
 
 
-def upload_image_to_gridfs(file_path: str, filename: str, metadata: dict) -> None:
-    if not mongo_enabled() or grid_fs is None:
-        return
-    try:
-        with open(file_path, "rb") as f:
-            # Only store essential metadata
-            essential_metadata = {
-                "user_id": metadata.get("user_id"),
-                "timestamp": metadata.get("timestamp"),
-                "color": metadata.get("color")
-            }
-            grid_fs.put(f.read(), filename=filename, metadata=essential_metadata)
-            print(f"✅ Uploaded image to GridFS: {filename}")
-    except Exception as e:
-        print(f"⚠️ Failed to upload image to GridFS: {e}")
-
-def upload_file_to_gridfs(file_path: str, filename: str, content_type: Optional[str] = None, metadata: Optional[dict] = None) -> Optional[str]:
-    if not mongo_enabled() or grid_fs is None:
+def upload_file_to_s3(file_path: str, key: str, content_type: Optional[str] = None, metadata: Optional[dict] = None) -> Optional[str]:
+    if not s3_enabled() or not os.path.exists(file_path):
         return None
+    extra_args: Dict[str, Any] = {}
+    if content_type:
+        extra_args["ContentType"] = content_type
+    if metadata:
+        extra_args["Metadata"] = {k: str(v) for k, v in metadata.items() if v is not None}
     try:
-        with open(file_path, "rb") as f:
-            # Only store essential metadata
-            essential_metadata = {
-                "user_id": metadata.get("user_id") if metadata else None,
-                "created_at": datetime.datetime.utcnow()
-            }
-            file_id = grid_fs.put(
-                f.read(),
-                filename=filename,
-                content_type=content_type,
-                metadata=essential_metadata
-            )
-            print(f"✅ Uploaded to GridFS: {filename} -> {file_id}")
-            return str(file_id)
-    except Exception as e:
-        print(f"⚠️ Failed to upload file to GridFS: {e}")
+        s3_client.upload_file(file_path, S3_BUCKET_NAME, _s3_key(key), ExtraArgs=extra_args)
+        print(f"✅ Uploaded to S3: s3://{S3_BUCKET_NAME}/{_s3_key(key)}")
+        return key
+    except ClientError as e:
+        print(f"⚠️ Failed to upload to S3: {e}")
         return None
 
 
-def save_analysis_to_mongo(user_id: str, analysis_result: dict) -> None:
-    if not mongo_enabled():
-        return
+def upload_bytes_to_s3(content_bytes: bytes, key: str, content_type: Optional[str] = None, metadata: Optional[dict] = None) -> Optional[str]:
+    if not s3_enabled():
+        return None
+    extra_args: Dict[str, Any] = {}
+    if content_type:
+        extra_args["ContentType"] = content_type
+    if metadata:
+        extra_args["Metadata"] = {k: str(v) for k, v in metadata.items() if v is not None}
     try:
-        # Only store essential analysis data
-        doc = {
-            "user_id": user_id,
-            "is_injected": analysis_result.get("is_injected"),
-            "timestamp": datetime.datetime.utcnow(),
-            "status": analysis_result.get("status"),
-            "consistency": analysis_result.get("analysis", {}).get("consistency"),
-            "match_percentage": analysis_result.get("analysis", {}).get("match_percentage"),
-            "total_frames_analyzed": analysis_result.get("analysis", {}).get("total_frames_analyzed")
-        }
-        mongo_db["analysis_results"].insert_one(doc)
+        s3_client.put_object(Bucket=S3_BUCKET_NAME, Key=_s3_key(key), Body=content_bytes, **extra_args)
+        print(f"✅ Uploaded object to S3: s3://{S3_BUCKET_NAME}/{_s3_key(key)}")
+        return key
+    except ClientError as e:
+        print(f"⚠️ Failed to upload object to S3: {e}")
+        return None
+
+
+def save_json_to_s3(obj: dict, key: str) -> Optional[str]:
+    try:
+        content = json.dumps(obj, indent=4).encode("utf-8")
+        return upload_bytes_to_s3(content, key, content_type="application/json")
     except Exception as e:
-        print(f"⚠️ Failed to save analysis to MongoDB: {e}")
+        print(f"⚠️ Failed to serialize JSON for S3: {e}")
+        return None
 
 # Define storage directories
 UPLOAD_FOLDER = "data"
@@ -239,7 +197,7 @@ def handle_video_start(data):
     print(f"✅ start time: {start_time}")
 
 def handle_color_change(data, user_id):
-    """Stores color change events in a JSON file per user."""
+    """Stores color change events in a JSON file per user and mirrors to S3."""
     previous_color = data.get("previousColor")
     new_color = data.get("newColor")
     timestamp = data.get("timestamp")
@@ -271,8 +229,13 @@ def handle_color_change(data, user_id):
         with open(user_color_file, "w") as f:
             json.dump(color_data, f, indent=4)
 
-    # Also persist to MongoDB if configured
-    save_color_change_to_mongo(user_id, entry)
+    # Also mirror to S3 as JSON log per user
+    if s3_enabled():
+        try:
+            s3_key = f"{user_id}/color_changes/{timestamp}.json"
+            save_json_to_s3(entry, s3_key)
+        except Exception as e:
+            print(f"⚠️ Failed to upload color change event to S3: {e}")
 
     print(f"🎨 Color Change Logged: {previous_color_name} → {new_color_name} at {timestamp} for {user_id}")
 
@@ -316,10 +279,10 @@ def handle_video_end(data, user_id):
         user_data[user_id]["video_chunks"].clear()
 
         print(f"Video created for user {user_id}: {output_video_path}")
-        # Upload merged MP4 to GridFS if enabled
-        upload_file_to_gridfs(
+        # Upload merged MP4 to S3 if enabled
+        upload_file_to_s3(
             output_video_path,
-            filename=f"{user_id}/final_video.mp4",
+            key=f"{user_id}/final_video.mp4",
             content_type="video/mp4",
             metadata={
                 "user_id": user_id,
@@ -440,10 +403,11 @@ def extract_frames(user_id, video_path):
                 frame_path = os.path.join(user_image_folder, frame_filename)
                 cv2.imwrite(frame_path, frame)
                 print(f"🖼️ Frame with text saved: {frame_path}")
-                # Upload this saved frame to GridFS if enabled
-                upload_image_to_gridfs(
+                # Upload this saved frame to S3 if enabled
+                upload_file_to_s3(
                     frame_path,
-                    filename=f"{user_id}/{frame_filename}",
+                    key=f"{user_id}/frames/{frame_filename}",
+                    content_type="image/png",
                     metadata={
                         "user_id": user_id,
                         "timestamp": int(timestamp),
@@ -581,8 +545,9 @@ def is_video_injected(user_id):
         with open(output_file, 'w') as f:
             json.dump(analysis_result, f, indent=4)
 
-        # Also persist analysis to MongoDB if configured
-        save_analysis_to_mongo(user_id, analysis_result)
+        # Also mirror analysis to S3 if enabled
+        if s3_enabled():
+            save_json_to_s3(analysis_result, f"{user_id}/analysis/{user_id}_response.json")
 
         # Clean up temporary directory
         shutil.rmtree(temp_dir)
@@ -602,8 +567,9 @@ def is_video_injected(user_id):
         with open(output_file, 'w') as f:
             json.dump(error_result, f, indent=4)
         
-        # Try to save error result to MongoDB as well
-        save_analysis_to_mongo(user_id, error_result)
+        # Mirror error result to S3 as well
+        if s3_enabled():
+            save_json_to_s3(error_result, f"{user_id}/analysis/{user_id}_response.json")
             
         return error_result
 
