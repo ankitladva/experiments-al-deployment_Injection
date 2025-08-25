@@ -8,6 +8,8 @@ services:
       - "8000:8000"
     volumes:
       - data_volume:/app/data
+    env_file:
+      - /Users/ankitladva/Downloads/experiments-al-deployment_Injection/kyc-backend.env
     restart: unless-stopped
 
   frontend:

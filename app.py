@@ -231,13 +231,13 @@ def handle_color_change(data, user_id):
         with open(user_color_file, "w") as f:
             json.dump(color_data, f, indent=4)
 
-    # Also mirror to S3 as JSON log per user
+    # Also mirror the aggregated color data file to S3 to match download_data structure
     if s3_enabled():
         try:
-            s3_key = f"{user_id}/color_changes/{timestamp}.json"
-            save_json_to_s3(entry, s3_key)
+            s3_key = f"download_data/{user_id}/color_data/{user_id}.json"
+            upload_file_to_s3(user_color_file, key=s3_key, content_type="application/json")
         except Exception as e:
-            print(f"⚠️ Failed to upload color change event to S3: {e}")
+            print(f"⚠️ Failed to upload color data JSON to S3: {e}")
 
     print(f"🎨 Color Change Logged: {previous_color_name} → {new_color_name} at {timestamp} for {user_id}")
 
@@ -281,10 +281,10 @@ def handle_video_end(data, user_id):
         user_data[user_id]["video_chunks"].clear()
 
         print(f"Video created for user {user_id}: {output_video_path}")
-        # Upload merged MP4 to S3 if enabled
+        # Upload merged MP4 to S3 in desired folder structure
         upload_file_to_s3(
             output_video_path,
-            key=f"{user_id}/final_video.mp4",
+            key=f"download_data/{user_id}/videos/{user_id}.mp4",
             content_type="video/mp4",
             metadata={
                 "user_id": user_id,
@@ -405,10 +405,10 @@ def extract_frames(user_id, video_path):
                 frame_path = os.path.join(user_image_folder, frame_filename)
                 cv2.imwrite(frame_path, frame)
                 print(f"🖼️ Frame with text saved: {frame_path}")
-                # Upload this saved frame to S3 if enabled
+                # Upload this saved frame to S3 in desired folder structure
                 upload_file_to_s3(
                     frame_path,
-                    key=f"{user_id}/frames/{frame_filename}",
+                    key=f"download_data/{user_id}/images/{frame_filename}",
                     content_type="image/png",
                     metadata={
                         "user_id": user_id,
@@ -547,9 +547,9 @@ def is_video_injected(user_id):
         with open(output_file, 'w') as f:
             json.dump(analysis_result, f, indent=4)
 
-        # Also mirror analysis to S3 if enabled
+        # Also mirror analysis to S3 in desired folder structure
         if s3_enabled():
-            save_json_to_s3(analysis_result, f"{user_id}/analysis/{user_id}_response.json")
+            upload_file_to_s3(output_file, key=f"download_data/{user_id}/analysis/{user_id}_response.json", content_type="application/json")
 
         # Clean up temporary directory
         shutil.rmtree(temp_dir)
@@ -569,9 +569,9 @@ def is_video_injected(user_id):
         with open(output_file, 'w') as f:
             json.dump(error_result, f, indent=4)
         
-        # Mirror error result to S3 as well
+        # Mirror error result to S3 as well in desired folder structure
         if s3_enabled():
-            save_json_to_s3(error_result, f"{user_id}/analysis/{user_id}_response.json")
+            upload_file_to_s3(output_file, key=f"download_data/{user_id}/analysis/{user_id}_response.json", content_type="application/json")
             
         return error_result
 
