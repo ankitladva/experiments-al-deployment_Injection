@@ -76,10 +76,14 @@ def save_color_change_to_mongo(user_id: str, entry: dict) -> None:
     if not mongo_enabled():
         return
     try:
+        # Only store essential color change data
         doc = {
             "user_id": user_id,
-            **entry,
-            "created_at": datetime.datetime.utcnow().isoformat()
+            "previous_color": entry.get("previous_color"),
+            "new_color": entry.get("new_color"),
+            "timestamp": entry.get("timestamp"),
+            "video_start_time": entry.get("video_start_time"),
+            "created_at": datetime.datetime.utcnow()
         }
         mongo_db["color_changes"].insert_one(doc)
     except Exception as e:
@@ -91,7 +95,14 @@ def upload_image_to_gridfs(file_path: str, filename: str, metadata: dict) -> Non
         return
     try:
         with open(file_path, "rb") as f:
-            grid_fs.put(f.read(), filename=filename, metadata=metadata)
+            # Only store essential metadata
+            essential_metadata = {
+                "user_id": metadata.get("user_id"),
+                "timestamp": metadata.get("timestamp"),
+                "color": metadata.get("color")
+            }
+            grid_fs.put(f.read(), filename=filename, metadata=essential_metadata)
+            print(f"✅ Uploaded image to GridFS: {filename}")
     except Exception as e:
         print(f"⚠️ Failed to upload image to GridFS: {e}")
 
@@ -100,11 +111,16 @@ def upload_file_to_gridfs(file_path: str, filename: str, content_type: Optional[
         return None
     try:
         with open(file_path, "rb") as f:
+            # Only store essential metadata
+            essential_metadata = {
+                "user_id": metadata.get("user_id") if metadata else None,
+                "created_at": datetime.datetime.utcnow()
+            }
             file_id = grid_fs.put(
                 f.read(),
                 filename=filename,
                 content_type=content_type,
-                metadata=metadata or {}
+                metadata=essential_metadata
             )
             print(f"✅ Uploaded to GridFS: {filename} -> {file_id}")
             return str(file_id)
@@ -117,9 +133,15 @@ def save_analysis_to_mongo(user_id: str, analysis_result: dict) -> None:
     if not mongo_enabled():
         return
     try:
+        # Only store essential analysis data
         doc = {
             "user_id": user_id,
-            **analysis_result
+            "is_injected": analysis_result.get("is_injected"),
+            "timestamp": datetime.datetime.utcnow(),
+            "status": analysis_result.get("status"),
+            "consistency": analysis_result.get("analysis", {}).get("consistency"),
+            "match_percentage": analysis_result.get("analysis", {}).get("match_percentage"),
+            "total_frames_analyzed": analysis_result.get("analysis", {}).get("total_frames_analyzed")
         }
         mongo_db["analysis_results"].insert_one(doc)
     except Exception as e:
