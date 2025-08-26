@@ -10,6 +10,8 @@ services:
       - data_volume:/app/data
     env_file:
       - /Users/ankitladva/Downloads/experiments-al-deployment_Injection/kyc-backend.env
+    environment:
+      - API_KEY=${API_KEY}
     restart: unless-stopped
 
   frontend:

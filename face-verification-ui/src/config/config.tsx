@@ -11,3 +11,10 @@
 export const BACKEND_URL = (import.meta.env.VITE_BACKEND_URL as string) || window.location.origin;
 console.log("BACKEND_URL::",BACKEND_URL)
 
+// API Key for backend authentication
+export const API_KEY = import.meta.env.VITE_API_KEY as string;
+if (!API_KEY) {
+    console.error("❌ VITE_API_KEY environment variable is not set! Backend connection will fail.");
+}
+console.log("API_KEY configured:", API_KEY ? "Yes" : "No");
+

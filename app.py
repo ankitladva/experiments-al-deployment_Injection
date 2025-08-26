@@ -1,6 +1,7 @@
 import cv2
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from uuid import uuid4
 import os
 import threading
@@ -19,6 +20,12 @@ from botocore.exceptions import ClientError
 
 app = FastAPI()
 
+# Security configuration
+API_KEY = os.getenv("API_KEY")
+if not API_KEY:
+    raise ValueError("API_KEY environment variable must be set for security. Please set a secure API key.")
+API_KEY_HEADER = "X-API-Key"
+
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
@@ -28,10 +35,26 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Health endpoint for uptime checks
+# Security dependency
+async def verify_api_key(x_api_key: str = Header(None)):
+    if not x_api_key:
+        raise HTTPException(status_code=401, detail="API key is required")
+    if x_api_key != API_KEY:
+        raise HTTPException(status_code=403, detail="Invalid API key")
+    return x_api_key
+
+# Health endpoint for uptime checks (no authentication required)
 @app.get("/health")
 def health_check():
     return {"status": "ok"}
+
+# Secure endpoint to get API key (for frontend use)
+@app.get("/api-key")
+async def get_api_key():
+    # This endpoint returns a hashed version of the API key for verification
+    import hashlib
+    hashed_key = hashlib.sha256(API_KEY.encode()).hexdigest()[:16]
+    return {"api_key_hash": hashed_key, "message": "Use this hash to verify your API key"}
 
 """
 S3 configuration
@@ -157,6 +180,12 @@ manager = ConnectionManager()
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
+    # Check for API key in query parameters for WebSocket
+    api_key = websocket.query_params.get("api_key")
+    if not api_key or api_key != API_KEY:
+        await websocket.close(code=4001, reason="Invalid API key")
+        return
+    
     user_id = str(uuid4())
     await manager.connect(websocket, user_id)
     

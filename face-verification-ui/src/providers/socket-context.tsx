@@ -1,5 +1,5 @@
 import { createContext, useEffect, useState } from "react";
-import { BACKEND_URL } from "../config/config";
+import { BACKEND_URL, API_KEY } from "../config/config";
 
 export interface SocketContextType {
     socket: WebSocket | null;
@@ -20,7 +20,7 @@ const SocketContextProvider = (props: any): JSX.Element => {
     useEffect(() => {
         if (!socket?.OPEN) {
             // Use ws/wss based on current page protocol
-            const wsUrl = BACKEND_URL.replace(/^http/, 'ws') + '/ws';
+            const wsUrl = BACKEND_URL.replace(/^http/, 'ws') + '/ws?api_key=' + encodeURIComponent(API_KEY);
     
             console.log("Attempting to connect to WebSocket URL:", wsUrl);
     
