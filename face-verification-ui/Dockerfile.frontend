@@ -9,6 +9,8 @@ RUN npm config set fetch-timeout 600000 && \
     npm config set fetch-retry-maxtimeout 120000
 ARG VITE_BACKEND_URL
 ENV VITE_BACKEND_URL=$VITE_BACKEND_URL
+ARG VITE_API_KEY
+ENV VITE_API_KEY=$VITE_API_KEY
 RUN npm ci --no-audit --no-fund
 COPY face-verification-ui/ ./
 RUN npm run build

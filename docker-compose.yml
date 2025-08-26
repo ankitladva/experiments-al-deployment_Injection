@@ -18,6 +18,10 @@ services:
     build:
       context: /Users/ankitladva/Downloads/experiments-al-deployment_Injection
       dockerfile: face-verification-ui/Dockerfile.frontend
+      args:
+        # These are injected into the Vite build and must be set in your shell or env file
+        VITE_BACKEND_URL: ${VITE_BACKEND_URL}
+        VITE_API_KEY: ${VITE_API_KEY}
     container_name: kyc-frontend
     ports:
       - "5173:80"
