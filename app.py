@@ -270,23 +270,38 @@ def handle_color_change(data, user_id):
 
     print(f"🎨 Color Change Logged: {previous_color_name} → {new_color_name} at {timestamp} for {user_id}")
 
+def _ext_from_mime(mime: Optional[str]) -> str:
+    if not mime:
+        return ".webm"
+    mime = mime.lower()
+    if "mp4" in mime:
+        return ".mp4"
+    if "webm" in mime:
+        return ".webm"
+    return ".webm"
+
+
 def handle_video_chunk(data, binary_data, user_id):
     """Handles video chunk received from the client."""
     start_time = data.get("startTime")
     end_time = data.get("endTime")
+    mime_type = data.get("mimeType")
+    sequence = data.get("sequence")
 
     if not user_id or binary_data is None:
         return
 
     # Save the binary chunk
     with user_locks[user_id]:
-        chunk_filename = f"{user_id}_{start_time}_{end_time}.webm"
+        ext = _ext_from_mime(mime_type)
+        safe_seq = f"_{int(sequence):06d}" if sequence is not None else ""
+        chunk_filename = f"{user_id}_{start_time}_{end_time}{safe_seq}{ext}"
         chunk_path = os.path.join(CHUNKS_FOLDER, chunk_filename)
         with open(chunk_path, "wb") as f:
             f.write(binary_data)
 
         user_data[user_id]["video_chunks"].append(chunk_path)
-        print(f"Chunk saved for user {user_id}: {chunk_path}, {start_time} {end_time}")
+        print(f"Chunk saved for user {user_id}: {chunk_path}, {start_time} {end_time} mime={mime_type}")
 
 def handle_video_end(data, user_id):
     """Handles video end event and merges chunks for a specific user."""
@@ -294,22 +309,72 @@ def handle_video_end(data, user_id):
         return
 
     with user_locks[user_id]:
-        if not user_data[user_id]["video_chunks"]:
+        chunk_paths = list(user_data[user_id]["video_chunks"])
+        if not chunk_paths:
+            print(f"⚠️ No chunks found for user {user_id} on video_end")
             return
 
-        # Merge chunks into a single video file
-        num_chunks = len(user_data[user_id]["video_chunks"])
+        # Ensure chunks are ordered by the sequence number if present, else by start time
+        def _parse_seq(path: str) -> int:
+            base = os.path.basename(path)
+            parts = base.split("_")
+            try:
+                # last token might contain sequence like 000001.ext
+                seq_part = parts[-1]
+                seq_num = int(seq_part.split(".")[0])
+                return seq_num
+            except Exception:
+                return 0
+
+        def _parse_start(path: str) -> int:
+            base = os.path.basename(path)
+            parts = base.split("_")
+            try:
+                return int(parts[1])
+            except Exception:
+                return 0
+
+        # Sort by sequence first if any sequence exists, else by start time
+        if any(path.rsplit("_", 1)[-1].split(".")[0].isdigit() for path in chunk_paths):
+            chunk_paths.sort(key=_parse_seq)
+        else:
+            chunk_paths.sort(key=_parse_start)
+
+        num_chunks = len(chunk_paths)
+
+        # If chunks are MP4, concatenate via ffmpeg; if WebM, first convert to MP4
+        mp4_chunks: List[str] = []
+        temp_dir = os.path.join(MP4_FOLDER, user_id)
+        os.makedirs(temp_dir, exist_ok=True)
+
+        for idx, path in enumerate(chunk_paths):
+            ext = os.path.splitext(path)[1].lower()
+            if ext == ".mp4":
+                mp4_chunks.append(path)
+            else:
+                mp4_path = os.path.join(temp_dir, f"chunk_{idx:06d}.mp4")
+                if convert_webm_to_mp4(path, mp4_path):
+                    mp4_chunks.append(mp4_path)
+                else:
+                    print(f"⚠️ Skipping chunk that failed to convert: {path}")
+
         output_video_path = os.path.join(MP4_FOLDER, f"{user_id}_final_video.mp4")
 
-        with open(output_video_path, "wb") as merged_video:
-            for chunk_path in user_data[user_id]["video_chunks"]:
-                with open(chunk_path, "rb") as chunk_file:
-                    merged_video.write(chunk_file.read())
+        if len(mp4_chunks) == 1:
+            # Single chunk, copy to final
+            shutil.copyfile(mp4_chunks[0], output_video_path)
+        elif len(mp4_chunks) > 1:
+            if not merge_mp4_chunks(mp4_chunks, output_video_path):
+                print(f"❌ Failed to merge MP4 chunks for user {user_id}")
+                return
+        else:
+            print(f"❌ No usable MP4 chunks for user {user_id}")
+            return
 
         # Clear user data
         user_data[user_id]["video_chunks"].clear()
 
-        print(f"Video created for user {user_id}: {output_video_path}")
+        print(f"✅ Video created for user {user_id}: {output_video_path}")
         # Upload merged MP4 to S3 in desired folder structure
         upload_file_to_s3(
             output_video_path,
