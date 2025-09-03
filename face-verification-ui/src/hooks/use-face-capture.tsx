@@ -19,12 +19,14 @@ export const useFaceCapture = ({
 }: UseFaceCapture) => {
   const { socket, sendMessage, sendBinaryMessage } = useContext(SocketContext);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const selectedMimeTypeRef = useRef<string | undefined>(undefined);
   const videoStartTimestamp = useRef<number | null>(null);
   const currentChunkStartTime = useRef<number | null>(null);
   const userId = useRef<string | null>(null);
   const lastCaptureColor = useRef<number>(-1);
   const isCompleting = useRef(false);
   const lastScanPosition = useRef<number>(0);
+  const chunkSequenceRef = useRef<number>(0);
   const [isScanComplete, setIsScanComplete] = useState<boolean>(false);
 
   // Initialize video recording when capturing starts
@@ -44,18 +46,33 @@ export const useFaceCapture = ({
   const handleStartCamera = async () => {
     try {
       if (!videoRef.current) return;
-  
-      const stream = videoRef.current.video.captureStream();
+      
+      // Prefer the original MediaStream instead of captureStream for iOS Safari
+      const element = videoRef.current.video as HTMLVideoElement | undefined;
+      const existingStream = (element?.srcObject as MediaStream) || (videoRef.current as any).stream || null;
+      const stream = existingStream || (element && (element as any).captureStream ? (element as any).captureStream() : null);
 
       if (stream) {
+        // Choose a supported mimeType
+        const preferredTypes = [
+          'video/webm;codecs=vp9',
+          'video/webm;codecs=vp8',
+          'video/webm',
+          'video/mp4;codecs=h264', // iOS Safari often supports this
+          'video/mp4'
+        ];
+        const supportedType = preferredTypes.find(t => (window as any).MediaRecorder && (MediaRecorder as any).isTypeSupported && MediaRecorder.isTypeSupported(t));
+        selectedMimeTypeRef.current = supportedType;
+
         const recorder = new MediaRecorder(stream, {
           bitsPerSecond: 2500000,
-          mimeType:undefined,
-        });
+          mimeType: supportedType,
+        } as any);
         mediaRecorderRef.current = recorder;
         
         videoStartTimestamp.current = Date.now();
         currentChunkStartTime.current = videoStartTimestamp.current;
+        chunkSequenceRef.current = 0;
         
         recorder.ondataavailable = async (event) => {
           if (event.data.size > 0) {
@@ -63,9 +80,13 @@ export const useFaceCapture = ({
           }
         };
 
+        recorder.onerror = (e: any) => {
+          console.error('MediaRecorder error:', e);
+        };
+
         sendMessage("video_start", { 
           timestamp: videoStartTimestamp.current, 
-          mimeType: 'video/webm'
+          mimeType: selectedMimeTypeRef.current || 'video/webm'
         });
 
         // Send chunks every second
@@ -90,7 +111,8 @@ export const useFaceCapture = ({
           startTime: currentChunkStartTime.current,
           endTime: chunkEndTime,
           fromEnd: isFinalChunk,
-          mimeType: 'video/webm'
+          mimeType: (data as any).type || selectedMimeTypeRef.current || 'video/webm',
+          sequence: chunkSequenceRef.current++
         },
         chunk
       );
