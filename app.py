@@ -342,21 +342,18 @@ def handle_video_end(data, user_id):
 
         num_chunks = len(chunk_paths)
 
-        # If chunks are MP4, concatenate via ffmpeg; if WebM, first convert to MP4
+        # Transcode all chunks to normalized MP4 to ensure compatibility
         mp4_chunks: List[str] = []
         temp_dir = os.path.join(MP4_FOLDER, user_id)
         os.makedirs(temp_dir, exist_ok=True)
 
         for idx, path in enumerate(chunk_paths):
-            ext = os.path.splitext(path)[1].lower()
-            if ext == ".mp4":
-                mp4_chunks.append(path)
+            # Transcode everything to normalized MP4
+            mp4_path = os.path.join(temp_dir, f"chunk_{idx:06d}.mp4")
+            if convert_any_to_mp4(path, mp4_path):
+                mp4_chunks.append(mp4_path)
             else:
-                mp4_path = os.path.join(temp_dir, f"chunk_{idx:06d}.mp4")
-                if convert_webm_to_mp4(path, mp4_path):
-                    mp4_chunks.append(mp4_path)
-                else:
-                    print(f"⚠️ Skipping chunk that failed to convert: {path}")
+                print(f"⚠️ Skipping chunk that failed to transcode: {path}")
 
         output_video_path = os.path.join(MP4_FOLDER, f"{user_id}_final_video.mp4")
 
@@ -399,8 +396,9 @@ def convert_webm_to_mp4(webm_path, mp4_path):
             "-c:v", "libx264",
             "-preset", "fast",
             "-crf", "23",
-            "-c:a", "aac",
-            "-strict", "experimental",
+            "-pix_fmt", "yuv420p",
+            "-r", "30",
+            "-an",
             mp4_path
         ]
         subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -437,6 +435,27 @@ def merge_mp4_chunks(mp4_chunks, output_path):
 
     except subprocess.CalledProcessError as e:
         print(f"❌ FFmpeg failed: {e.stderr.decode('utf-8')}")
+        return False
+
+
+def convert_any_to_mp4(input_path: str, output_path: str) -> bool:
+    """Transcodes any input video to a normalized MP4 to ensure concat compatibility."""
+    try:
+        command = [
+            "ffmpeg",
+            "-y", "-i", input_path,
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-crf", "23",
+            "-pix_fmt", "yuv420p",
+            "-r", "30",
+            "-an",
+            output_path,
+        ]
+        subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"❌ FFmpeg transcode error: {e.stderr.decode('utf-8')}")
         return False
 
 def cleanup_user_files(user_id):
