@@ -156,7 +156,14 @@ os.makedirs(COLOR_DATA_FOLDER, exist_ok=True)
 os.makedirs(IMAGE_FOLDER, exist_ok=True)
 
 # Thread-safe storage for user data
-user_data = defaultdict(lambda: {"video_chunks": [], "converted_mp4s": [], "color_changes": []})
+user_data = defaultdict(lambda: {
+    "video_chunks": [],
+    "converted_mp4s": [],
+    "color_changes": [],
+    "aggregate_path": None,
+    "mime_type": None,
+    "num_chunks": 0
+})
 user_locks = defaultdict(threading.Lock)
 
 # WebSocket connection manager
@@ -272,13 +279,15 @@ def handle_color_change(data, user_id):
 
 def _ext_from_mime(mime: Optional[str]) -> str:
     if not mime:
-        return ".webm"
+        # Prefer mp4 as safer default for iOS Safari when mime is missing
+        return ".mp4"
     mime = mime.lower()
     if "mp4" in mime:
         return ".mp4"
     if "webm" in mime:
         return ".webm"
-    return ".webm"
+    # Fallback to mp4
+    return ".mp4"
 
 
 def handle_video_chunk(data, binary_data, user_id):
@@ -291,17 +300,30 @@ def handle_video_chunk(data, binary_data, user_id):
     if not user_id or binary_data is None:
         return
 
-    # Save the binary chunk
+    # Append the binary chunk to a single aggregate recording file
     with user_locks[user_id]:
         ext = _ext_from_mime(mime_type)
-        safe_seq = f"_{int(sequence):06d}" if sequence is not None else ""
-        chunk_filename = f"{user_id}_{start_time}_{end_time}{safe_seq}{ext}"
-        chunk_path = os.path.join(CHUNKS_FOLDER, chunk_filename)
-        with open(chunk_path, "wb") as f:
+        aggregate_path = user_data[user_id].get("aggregate_path")
+        if not aggregate_path:
+            aggregate_path = os.path.join(CHUNKS_FOLDER, f"{user_id}_recording{ext}")
+            user_data[user_id]["aggregate_path"] = aggregate_path
+            user_data[user_id]["mime_type"] = mime_type
+            user_data[user_id]["num_chunks"] = 0
+            # If a file exists with different extension from earlier runs, remove it
+            for old_ext in [".mp4", ".webm"]:
+                old_path = os.path.join(CHUNKS_FOLDER, f"{user_id}_recording{old_ext}")
+                if old_path != aggregate_path and os.path.exists(old_path):
+                    try:
+                        os.remove(old_path)
+                    except Exception:
+                        pass
+
+        # Append bytes to the aggregate file; do not create per-chunk files
+        with open(aggregate_path, "ab") as f:
             f.write(binary_data)
 
-        user_data[user_id]["video_chunks"].append(chunk_path)
-        print(f"Chunk saved for user {user_id}: {chunk_path}, {start_time} {end_time} mime={mime_type}")
+        user_data[user_id]["num_chunks"] += 1
+        print(f"Chunk appended for user {user_id}: {aggregate_path} (+{len(binary_data)} bytes), chunks={user_data[user_id]['num_chunks']}")
 
 def handle_video_end(data, user_id):
     """Handles video end event and merges chunks for a specific user."""
@@ -309,67 +331,27 @@ def handle_video_end(data, user_id):
         return
 
     with user_locks[user_id]:
-        chunk_paths = list(user_data[user_id]["video_chunks"])
-        if not chunk_paths:
-            print(f"⚠️ No chunks found for user {user_id} on video_end")
+        aggregate_path = user_data[user_id].get("aggregate_path")
+        if not aggregate_path or not os.path.exists(aggregate_path):
+            print(f"⚠️ No aggregate recording found for user {user_id} on video_end")
             return
 
-        # Ensure chunks are ordered by the sequence number if present, else by start time
-        def _parse_seq(path: str) -> int:
-            base = os.path.basename(path)
-            parts = base.split("_")
-            try:
-                # last token might contain sequence like 000001.ext
-                seq_part = parts[-1]
-                seq_num = int(seq_part.split(".")[0])
-                return seq_num
-            except Exception:
-                return 0
-
-        def _parse_start(path: str) -> int:
-            base = os.path.basename(path)
-            parts = base.split("_")
-            try:
-                return int(parts[1])
-            except Exception:
-                return 0
-
-        # Sort by sequence first if any sequence exists, else by start time
-        if any(path.rsplit("_", 1)[-1].split(".")[0].isdigit() for path in chunk_paths):
-            chunk_paths.sort(key=_parse_seq)
-        else:
-            chunk_paths.sort(key=_parse_start)
-
-        num_chunks = len(chunk_paths)
-
-        # Transcode all chunks to normalized MP4 to ensure compatibility
-        mp4_chunks: List[str] = []
-        temp_dir = os.path.join(MP4_FOLDER, user_id)
-        os.makedirs(temp_dir, exist_ok=True)
-
-        for idx, path in enumerate(chunk_paths):
-            # Transcode everything to normalized MP4
-            mp4_path = os.path.join(temp_dir, f"chunk_{idx:06d}.mp4")
-            if convert_any_to_mp4(path, mp4_path):
-                mp4_chunks.append(mp4_path)
-            else:
-                print(f"⚠️ Skipping chunk that failed to transcode: {path}")
-
+        num_chunks = user_data[user_id].get("num_chunks", 0)
+        ext = os.path.splitext(aggregate_path)[1].lower()
         output_video_path = os.path.join(MP4_FOLDER, f"{user_id}_final_video.mp4")
 
-        if len(mp4_chunks) == 1:
-            # Single chunk, copy to final
-            shutil.copyfile(mp4_chunks[0], output_video_path)
-        elif len(mp4_chunks) > 1:
-            if not merge_mp4_chunks(mp4_chunks, output_video_path):
-                print(f"❌ Failed to merge MP4 chunks for user {user_id}")
-                return
+        if ext == ".mp4":
+            shutil.copyfile(aggregate_path, output_video_path)
         else:
-            print(f"❌ No usable MP4 chunks for user {user_id}")
-            return
+            if not convert_webm_to_mp4(aggregate_path, output_video_path):
+                print(f"❌ Failed to convert aggregate WebM to MP4 for user {user_id}")
+                return
 
         # Clear user data
         user_data[user_id]["video_chunks"].clear()
+        user_data[user_id]["aggregate_path"] = None
+        user_data[user_id]["mime_type"] = None
+        user_data[user_id]["num_chunks"] = 0
 
         print(f"✅ Video created for user {user_id}: {output_video_path}")
         # Upload merged MP4 to S3 in desired folder structure
@@ -396,9 +378,8 @@ def convert_webm_to_mp4(webm_path, mp4_path):
             "-c:v", "libx264",
             "-preset", "fast",
             "-crf", "23",
-            "-pix_fmt", "yuv420p",
-            "-r", "30",
-            "-an",
+            "-c:a", "aac",
+            "-strict", "experimental",
             mp4_path
         ]
         subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -435,27 +416,6 @@ def merge_mp4_chunks(mp4_chunks, output_path):
 
     except subprocess.CalledProcessError as e:
         print(f"❌ FFmpeg failed: {e.stderr.decode('utf-8')}")
-        return False
-
-
-def convert_any_to_mp4(input_path: str, output_path: str) -> bool:
-    """Transcodes any input video to a normalized MP4 to ensure concat compatibility."""
-    try:
-        command = [
-            "ffmpeg",
-            "-y", "-i", input_path,
-            "-c:v", "libx264",
-            "-preset", "veryfast",
-            "-crf", "23",
-            "-pix_fmt", "yuv420p",
-            "-r", "30",
-            "-an",
-            output_path,
-        ]
-        subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        return True
-    except subprocess.CalledProcessError as e:
-        print(f"❌ FFmpeg transcode error: {e.stderr.decode('utf-8')}")
         return False
 
 def cleanup_user_files(user_id):
